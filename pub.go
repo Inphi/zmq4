@@ -7,17 +7,24 @@ package zmq4
 import (
 	"context"
 	"net"
+	"fmt"
+	"io"
 	"sync"
 
 	"github.com/pkg/errors"
 	"golang.org/x/sync/errgroup"
 )
 
+type connRemoveCB func(w *msgWriter)
+
 // NewPub returns a new PUB ZeroMQ socket.
 // The returned socket value is initially unbound.
 func NewPub(ctx context.Context, opts ...Option) Socket {
 	pub := &pubSocket{sck: newSocket(ctx, Pub, opts...)}
-	pub.sck.w = newPubMWriter(pub.sck.ctx)
+  rmcb := func(w *msgWriter) {
+    pub.sck.rmConn(w.w)
+  }
+	pub.sck.w = newPubMWriter(pub.sck.ctx, rmcb)
 	pub.sck.r = newPubQReader(pub.sck.ctx)
 	return pub
 }
@@ -183,12 +190,18 @@ type pubMWriter struct {
 	ctx context.Context
 	mu  sync.Mutex
 	ws  []*msgWriter
+	invalidWriters chan *msgWriter
+	rmcb connRemoveCB
 }
 
-func newPubMWriter(ctx context.Context) *pubMWriter {
-	return &pubMWriter{
+func newPubMWriter(ctx context.Context, rmcb connRemoveCB) *pubMWriter {
+  pw := &pubMWriter{
 		ctx: ctx,
+    invalidWriters : make(chan *msgWriter),
+    rmcb: rmcb,
 	}
+	go pw.removeInvalidConns()
+	return pw
 }
 
 func (w *pubMWriter) Close() error {
@@ -202,6 +215,8 @@ func (w *pubMWriter) Close() error {
 	}
 	w.ws = nil
 	w.mu.Unlock()
+
+  close(w.invalidWriters)
 	return err
 }
 
@@ -213,7 +228,6 @@ func (mw *pubMWriter) addConn(w *msgWriter) {
 
 func (mw *pubMWriter) rmConn(w *msgWriter) {
 	mw.mu.Lock()
-	defer mw.mu.Unlock()
 
 	cur := -1
 	for i := range mw.ws {
@@ -225,24 +239,50 @@ func (mw *pubMWriter) rmConn(w *msgWriter) {
 	if cur >= 0 {
 		mw.ws = append(mw.ws[:cur], mw.ws[cur+1:]...)
 	}
+
+	mw.mu.Unlock()
+
+  // ensure deadlocks and infinite recurse don't occur
+  if cur >= 0 && mw.rmcb != nil {
+    mw.rmcb(w)
+  }
 }
 
 func (w *pubMWriter) write(ctx context.Context, msg Msg) error {
 	grp, ctx := errgroup.WithContext(ctx)
 	w.mu.Lock()
 	topic := string(msg.Frames[0])
+
 	for i := range w.ws {
 		ww := w.ws[i]
 		grp.Go(func() error {
 			if !ww.w.subscribed(topic) {
 				return nil
 			}
-			return ww.write(ctx, msg)
+      err := ww.write(ctx, msg)
+      if err != nil && err != io.EOF {
+        fmt.Printf("DEBUG: write err %#v\n", err)
+        w.invalidWriters <- ww
+      }
+      return err
 		})
 	}
 	err := grp.Wait()
 	w.mu.Unlock()
+
 	return err
+}
+
+func (w *pubMWriter) removeInvalidConns() {
+  for {
+    select {
+    case mw, ok := <-w.invalidWriters:
+      if !ok {
+        return
+      }
+      w.rmConn(mw)
+    }
+  }
 }
 
 var (

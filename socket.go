@@ -48,6 +48,9 @@ type socket struct {
 	cancel   context.CancelFunc
 	listener net.Listener
 	dialer   net.Dialer
+
+	readers map[*Conn]*msgReader
+	writers map[*Conn]*msgWriter
 }
 
 func newDefaultSocket(ctx context.Context, sockType SocketType) *socket {
@@ -67,6 +70,8 @@ func newDefaultSocket(ctx context.Context, sockType SocketType) *socket {
 		ctx:    ctx,
 		cancel: cancel,
 		dialer: net.Dialer{Timeout: defaultTimeout},
+    readers: make(map[*Conn]*msgReader),
+    writers: make(map[*Conn]*msgWriter),
 	}
 }
 
@@ -89,7 +94,7 @@ func (sck *socket) Close() error {
 		defer sck.listener.Close()
 	}
 
-	if sck.conns == nil {
+	if sck.listener == nil && sck.conns == nil {
 		return errInvalidSocket
 	}
 
@@ -101,6 +106,12 @@ func (sck *socket) Close() error {
 			err = e
 		}
 	}
+  if sck.r != nil {
+    sck.r.Close()
+  }
+  if sck.w != nil {
+    sck.w.Close()
+  }
 	sck.mu.RUnlock()
 	if strings.HasPrefix(sck.ep, "ipc://") {
 		os.Remove(sck.ep[len("ipc://"):])
@@ -244,12 +255,52 @@ func (sck *socket) addConn(c *Conn) {
 	}
 	sck.ids[uuid] = c
 	if sck.r != nil {
-		sck.r.addConn(newMsgReader(c))
+    if r := sck.readers[c]; r != nil {
+      sck.r.rmConn(r)
+		  delete(sck.readers, c)
+    }
+    reader := newMsgReader(c)
+    sck.readers[c] = reader
+    sck.r.addConn(reader)
 	}
 	if sck.w != nil {
-		sck.w.addConn(newMsgWriter(c))
+    if w := sck.writers[c]; w != nil {
+      sck.w.rmConn(w)
+      delete(sck.writers, c)
+    }
+    writer := newMsgWriter(c)
+	  sck.writers[c] = writer
+		sck.w.addConn(writer)
 	}
 	sck.mu.Unlock()
+}
+
+func (sck *socket) rmConn(c *Conn) {
+	sck.mu.Lock()
+	defer sck.mu.Unlock()
+
+  cur := -1
+  for i := range sck.conns {
+    if sck.conns[i] == c {
+      cur = i
+      break
+    }
+  }
+  if cur >= 0 {
+    sck.conns = append(sck.conns[:cur], sck.conns[cur+1:]...)
+  }
+  if sck.r != nil {
+    if reader := sck.readers[c]; reader != nil {
+		  sck.r.rmConn(reader)
+		  delete(sck.readers, c)
+    }
+  }
+  if sck.w != nil {
+    if writer := sck.writers[c]; writer != nil {
+		  sck.w.rmConn(writer)
+		  delete(sck.writers, c)
+    }
+  }
 }
 
 // Type returns the type of this Socket (PUB, SUB, ...)
