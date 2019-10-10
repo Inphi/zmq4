@@ -6,6 +6,7 @@ package zmq4
 
 import (
 	"context"
+	"net"
 
 	"github.com/pkg/errors"
 )
@@ -52,6 +53,11 @@ func (pull *pullSocket) Dial(ep string) error {
 // Type returns the type of this Socket (PUB, SUB, ...)
 func (pull *pullSocket) Type() SocketType {
 	return pull.sck.Type()
+}
+
+// Addr returns the listen address
+func (pull *pullSocket) Addr() net.Addr {
+	return pull.sck.Addr()
 }
 
 // GetOption is used to retrieve an option for a socket.

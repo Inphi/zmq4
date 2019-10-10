@@ -6,6 +6,7 @@ package zmq4
 
 import (
 	"context"
+	"net"
 )
 
 // NewXSub returns a new XSUB ZeroMQ socket.
@@ -49,6 +50,11 @@ func (xsub *xsubSocket) Dial(ep string) error {
 // Type returns the type of this Socket (PUB, SUB, ...)
 func (xsub *xsubSocket) Type() SocketType {
 	return xsub.sck.Type()
+}
+
+// Addr returns the listen address
+func (xsub *xsubSocket) Addr() net.Addr {
+	return xsub.sck.Addr()
 }
 
 // GetOption is used to retrieve an option for a socket.
